@@ -2,8 +2,8 @@ name: linearb-metrics-watch
 
 on:
   schedule:
-    - cron: "0 1 * * *"  # 毎日 JST 10:00
-  workflow_dispatch:      # 手動実行も可能にする
+    - cron: "0 1 * * *"  # 毎日 JST 10:00 に実行
+  workflow_dispatch:      # 手動実行も可能
 
 jobs:
   create_issue_if_needed:
@@ -18,47 +18,66 @@ jobs:
           pip install requests --quiet
           python <<'PY'
           import os, requests, datetime, textwrap, json
-          LB, LIN, TEAM = os.environ['LB_TOKEN'], os.environ['LINEAR_TOKEN'], os.environ['LINEAR_TEAM_ID']
-          # ① LinearB 直近1週の Pickup 平均取得
-          since = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
-          payload = {
-              "from": since,
-              "metrics": ["cycle-time.pickup"],
-              "aggregate": "average"
-          }
-          res = requests.post(
-              "https://public-api.linearb.io/api/v2/measurements",
-              headers={"x-api-key": LB, "Content-Type": "application/json"},
-              json=payload, timeout=30
-          )
-          pickup = res.json()["cycle-time.pickup"]["average"]  # minutes
 
-          if pickup < 8*60:
+          LB   = os.environ['LB_TOKEN']
+          LIN  = os.environ['LINEAR_TOKEN']
+          TEAM = os.environ['LINEAR_TEAM_ID']
+
+          # --- ① LinearB v1 API ─ Pickup 平均を取得
+          since = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+          url   = f"https://public-api.linearb.io/v1/metrics/cycle-time?from={since}"
+          res   = requests.get(url, headers={"x-api-key": LB}, timeout=30)
+          res.raise_for_status()
+          pickup = res.json()["average"]["pickup"]  # 単位: minutes
+
+          THRESHOLD = 8 * 60  # しきい値: 8時間（480分）
+
+          if pickup < THRESHOLD:
               print(f"✅ OK ({pickup/60:.1f}h < 8h)")
               quit()
 
-          # ② Linear に Issue を作成
+          # --- ② Linear に Issue 作成
           title = f"[Auto] Pickup exceeds 8h ({pickup/60:.1f}h)"
-          desc = textwrap.dedent(f"""
+          desc  = textwrap.dedent(f"""
           ### 問題
-          Pickup 平均が **{pickup/60:.1f} 時間** と目標 8h を超過
+          Pickup 平均が **{pickup/60:.1f} 時間** と目標 8h を超過しています。
 
           ### 原因候補
-          - Reviewer 固定
-          - PR サイズ過大
+          - Reviewer が偏っている
+          - PR サイズが大きすぎる
 
-          ### 対策候補
-          - CODEOWNERS 整備
-          - PR 分割ルール・danger/large-pr 設定
+          ### 対策案
+          - CODEOWNERS 設定で reviewer 分散
+          - PR ガイドの整備
+          - danger/large-pr の自動チェック
           """)
 
-          gql = "mutation($in: IssueCreateInput!) { issueCreate(input: $in) { issue { identifier url } } }"
-          variables = { "in": { "teamId": TEAM, "title": title, "description": desc } }
+          gql = """
+          mutation($in: IssueCreateInput!) {
+            issueCreate(input: $in) {
+              issue {
+                identifier
+                url
+              }
+            }
+          }
+          """
 
-          r = requests.post(
-              "https://api.linear.app/graphql",
-              json={"query": gql, "variables": variables},
-              headers={"Authorization": LIN}, timeout=30
+          variables = {
+            "in": {
+              "teamId": TEAM,
+              "title": title,
+              "description": desc
+            }
+          }
+
+          response = requests.post(
+            "https://api.linear.app/graphql",
+            headers={"Authorization": LIN},
+            json={"query": gql, "variables": variables},
+            timeout=30
           )
-          print("✅ Linear Issue created:", r.json()["data"]["issueCreate"]["issue"]["url"])
+          data = response.json()
+          issue_url = data["data"]["issueCreate"]["issue"]["url"]
+          print(f"✅ Linear Issue created: {issue_url}")
           PY
