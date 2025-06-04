@@ -1,0 +1,71 @@
+# .github/workflows/codex.yml
+# ──────────────────────────────────────────────────────────────
+# GitHub Issue に「Codex」ラベルを付けたら ──► Codex へ転送
+# PR がマージされたら          ──────────────► .codex/*.md を自動削除
+# これ“1枚”で完結します。ラベル名は **Codex**（大文字 C）で統一してください。
+# ──────────────────────────────────────────────────────────────
+name: Codex automation
+
+on:
+  # ① Issue にラベルが付いた時
+  issues:
+    types: [labeled]
+
+  # ② PR がマージされた時（cleanup 用）
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write      # push を行うので write 権限が必要
+
+jobs:
+  #──────────────────────────────────────────────
+  # Job A : Issue → .codex/issue-<番号>.md 生成
+  #──────────────────────────────────────────────
+  to-codex:
+    if: github.event_name == 'issues' && github.event.label.name == 'Codex'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export issue body to .md
+        run: |
+          mkdir -p .codex
+          cat <<EOF > .codex/issue-${{ github.event.issue.number }}.md
+          #${{ github.event.issue.number }} ${{ github.event.issue.title }}
+
+          ${{ github.event.issue.body }}
+          EOF
+
+      - name: Commit & push
+        run: |
+          git config user.name  codex-bot
+          git config user.email codex-bot@example.com
+          git add .codex/issue-${{ github.event.issue.number }}.md
+          git commit -m "chore(codex): add issue ${{ github.event.issue.number }}"
+          git push
+
+  #──────────────────────────────────────────────
+  # Job B : PR マージ後に .codex クリーニング
+  #──────────────────────────────────────────────
+  cleanup:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Delete processed .codex files
+        run: |
+          rm -f .codex/issue-*.md || true
+
+      - name: Commit & push if anything deleted
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name  codex-cleaner
+            git config user.email codex-cleaner@example.com
+            git add -u
+            git commit -m "chore(codex): cleanup processed issue files"
+            git push
+          fi
