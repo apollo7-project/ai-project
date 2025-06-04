@@ -14,6 +14,7 @@ jobs:
           LB_TOKEN: ${{ secrets.LB_TOKEN }}
           LINEAR_TOKEN: ${{ secrets.LINEAR_TOKEN }}
           LINEAR_TEAM_ID: ${{ secrets.LINEAR_TEAM_ID }}
+          ORG_ID: ${{ secrets.ORG_ID }}  # 新規追加
         run: |
           pip install requests --quiet
           python <<'PY'
@@ -22,13 +23,45 @@ jobs:
           LB   = os.environ['LB_TOKEN']
           LIN  = os.environ['LINEAR_TOKEN']
           TEAM = os.environ['LINEAR_TEAM_ID']
+          ORG  = os.environ.get('ORG_ID', '')  # 無い場合は空文字
 
-          # --- ① LinearB v1 API ─ Pickup 平均を取得
+          # --- ① LinearB v2 API ─ orgId付きで Pickup 平均を取得
           since = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
-          url   = f"https://public-api.linearb.io/v1/metrics/cycle-time?from={since}"
-          res   = requests.get(url, headers={"x-api-key": LB}, timeout=30)
-          res.raise_for_status()
-          pickup = res.json()["average"]["pickup"]  # 単位: minutes
+          
+          payload = {
+              "metrics": ["cycle-time.pickup"],
+              "aggregate": "average",
+              "from": since
+          }
+          
+          # orgId がある場合は追加
+          if ORG:
+              payload["orgId"] = ORG
+
+          try:
+              # v2 API を使用
+              res = requests.post(
+                  "https://public-api.linearb.io/api/v2/measurements",
+                  headers={
+                      "x-api-key": LB, 
+                      "Content-Type": "application/json"
+                  },
+                  json=payload, 
+                  timeout=30
+              )
+              res.raise_for_status()
+              pickup = res.json()["cycle-time.pickup"]["average"]
+              
+          except requests.exceptions.HTTPError as e:
+              if e.response.status_code == 403:
+                  print("❌ LinearB API 403 Forbidden")
+                  print("解決策:")
+                  print("1. LinearB Organization Settings で 'Enable Public API' を ON にする")
+                  print("2. Organization ID を GitHub Secret 'ORG_ID' に追加する")
+                  print("3. API Token を再生成して LB_TOKEN を更新する")
+                  raise SystemExit(1)
+              else:
+                  raise
 
           THRESHOLD = 8 * 60  # しきい値: 8時間（480分）
 
@@ -77,7 +110,12 @@ jobs:
             json={"query": gql, "variables": variables},
             timeout=30
           )
+          
           data = response.json()
+          if "errors" in data:
+              print("❌ Linear API Error:", data["errors"])
+              raise SystemExit(1)
+              
           issue_url = data["data"]["issueCreate"]["issue"]["url"]
           print(f"✅ Linear Issue created: {issue_url}")
           PY
